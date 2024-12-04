@@ -219,7 +219,7 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
                                     );
                                 }
                                 Err(e) => {
-                                    let error = "JSON deserialization error occurred.";
+                                    let error = "Invalid JSON format.";
                                     log_error(&format!("Error details: {}", e));
                                     return ("400 Bad Request", error.to_string());
                                 }
