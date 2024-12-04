@@ -2,6 +2,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Arc, Mutex, mpsc};
@@ -31,10 +32,7 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 
 impl ThreadPool {
     pub fn new(size: usize) -> ThreadPool {
-        assert!(
-            size > 0,
-            "The size of the thread pool must be greater than 1."
-        );
+        assert!(size > 0, "Thread pool size must be at least 1.");
 
         let (sender, receiver) = mpsc::channel();
         let receiver = Arc::new(Mutex::new(receiver));
@@ -52,7 +50,7 @@ impl ThreadPool {
     where
         F: FnOnce() + Send + 'static,
     {
-        println!("The job is sent to the thread pool.");
+        println!("Sending job to thread pool.");
         let job = Box::new(f);
         self.sender.send(job).unwrap();
     }
@@ -67,8 +65,11 @@ impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || {
             loop {
-                let job = receiver.lock().unwrap().recv().unwrap();
-                println!("Worker {} has received the job. Running.", id);
+                let job = {
+                    let receiver = receiver.lock().unwrap();
+                    receiver.recv().unwrap()
+                };
+                println!("Worker {} received a job. Executing.", id);
                 job();
             }
         });
@@ -80,20 +81,32 @@ impl Worker {
     }
 }
 
+// Validation functions
 fn validate_todo_title(title: &str) -> Result<(), &'static str> {
     if title.trim().is_empty() {
-        Err("The title cannot be left blank.")
+        Err("Title cannot be empty.")
     } else {
         Ok(())
     }
 }
 
 fn validate_todo_completed(completed: &Option<bool>) -> Result<(), &'static str> {
-    if let Some(_) = completed {
+    if completed.is_some() {
         Ok(())
     } else {
-        Err("The completed field must be of type bool.")
+        Err("The 'completed' field must be of type bool.")
     }
+}
+
+// Function to log errors to a file
+fn log_error(message: &str) {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("error.log")
+        .expect("Failed to open error.log file.");
+    let timestamp = Utc::now().to_rfc3339();
+    writeln!(file, "[{}] {}", timestamp, message).expect("Failed to write to error log.");
 }
 
 pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
@@ -101,20 +114,18 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
     if let Some(first_line) = lines.next() {
         let parts: Vec<&str> = first_line.split_whitespace().collect();
         if parts.len() != 3 {
-            return (
-                "400 Bad Request",
-                "The request line is invalid.".to_string(),
-            );
+            let error = "Invalid request line.";
+            log_error(error);
+            return ("400 Bad Request", error.to_string());
         }
         let method = parts[0];
         let path = parts[1];
         let version = parts[2];
 
         if version != "HTTP/1.1" && version != "HTTP/1.0" && version != "HTTP/2.0" {
-            return (
-                "505 HTTP Version Not Supported",
-                "HTTP version not supported".to_string(),
-            );
+            let error = "HTTP version is not supported.";
+            log_error(error);
+            return ("505 HTTP Version Not Supported", error.to_string());
         }
 
         let mut headers = HashMap::new();
@@ -129,10 +140,9 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
                 }
                 headers.insert(key.to_string(), value.to_string());
             } else {
-                return (
-                    "400 Bad Request",
-                    "The header format is invalid.".to_string(),
-                );
+                let error = "Invalid header format.";
+                log_error(error);
+                return ("400 Bad Request", error.to_string());
             }
         }
 
@@ -149,9 +159,13 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
                             return get_todo(id, db);
                         }
                     }
-                    return ("400 Bad Request", "Invalid ID".to_string());
+                    let error = "Invalid ID.";
+                    log_error(error);
+                    return ("400 Bad Request", error.to_string());
                 }
-                return ("404 Not Found", "No endpoint found".to_string());
+                let error = "Endpoint not found.";
+                log_error(error);
+                return ("404 Not Found", error.to_string());
             }
             "POST" => {
                 if path == "/todos" {
@@ -159,20 +173,27 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
                         Ok(json) => {
                             if let Some(title) = json.get("title").and_then(|v| v.as_str()) {
                                 if let Err(e) = validate_todo_title(title) {
+                                    log_error(e);
                                     return ("400 Bad Request", e.to_string());
                                 }
                                 let title = title.to_string();
                                 return create_todo(title, db);
                             } else {
-                                return ("400 Bad Request", "A title is required.".to_string());
+                                let error = "Title is required.";
+                                log_error(error);
+                                return ("400 Bad Request", error.to_string());
                             }
                         }
                         Err(_) => {
-                            return ("400 Bad Request", "JSON format is invalid.".to_string());
+                            let error = "Invalid JSON format.";
+                            log_error(error);
+                            return ("400 Bad Request", error.to_string());
                         }
                     }
                 }
-                return ("404 Not Found", "No endpoint found".to_string());
+                let error = "Endpoint not found.";
+                log_error(error);
+                return ("404 Not Found", error.to_string());
             }
             "PUT" => {
                 if path.starts_with("/todos/") {
@@ -182,10 +203,12 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
                                 Ok(update_req) => {
                                     if let Some(ref title) = update_req.title {
                                         if let Err(e) = validate_todo_title(title) {
+                                            log_error(e);
                                             return ("400 Bad Request", e.to_string());
                                         }
                                     }
                                     if let Err(e) = validate_todo_completed(&update_req.completed) {
+                                        log_error(e);
                                         return ("400 Bad Request", e.to_string());
                                     }
                                     return update_todo(
@@ -195,18 +218,21 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
                                         db,
                                     );
                                 }
-                                Err(_) => {
-                                    return (
-                                        "400 Bad Request",
-                                        "JSON format is invalid.".to_string(),
-                                    );
+                                Err(e) => {
+                                    let error = "JSON deserialization error occurred.";
+                                    log_error(&format!("Error details: {}", e));
+                                    return ("400 Bad Request", error.to_string());
                                 }
                             }
                         }
                     }
-                    return ("400 Bad Request", "Invalid ID".to_string());
+                    let error = "Invalid ID.";
+                    log_error(error);
+                    return ("400 Bad Request", error.to_string());
                 }
-                return ("404 Not Found", "No endpoint found".to_string());
+                let error = "Endpoint not found.";
+                log_error(error);
+                return ("404 Not Found", error.to_string());
             }
             "DELETE" => {
                 if path.starts_with("/todos/") {
@@ -215,19 +241,22 @@ pub fn process_request(request: &str, db: Db) -> (&'static str, String) {
                             return delete_todo(id, db);
                         }
                     }
-                    return ("400 Bad Request", "Invalid ID".to_string());
+                    let error = "Invalid ID.";
+                    log_error(error);
+                    return ("400 Bad Request", error.to_string());
                 }
-                return ("404 Not Found", "No endpoint found".to_string());
+                let error = "Endpoint not found.";
+                log_error(error);
+                return ("404 Not Found", error.to_string());
             }
             _ => {
-                return (
-                    "405 Method Not Allowed",
-                    "The method is not allowed.".to_string(),
-                );
+                let error = "Method is not allowed.";
+                log_error(error);
+                return ("405 Method Not Allowed", error.to_string());
             }
         }
     }
-    ("400 Bad Request", "The request is invalid.".to_string())
+    ("400 Bad Request", "Invalid request.".to_string())
 }
 
 fn process_request_get_todos(db: Db) -> (&'static str, String) {
@@ -243,7 +272,9 @@ pub fn get_todo(id: usize, db: Db) -> (&'static str, String) {
         let body = serde_json::to_string(todo).unwrap();
         ("200 OK", body)
     } else {
-        ("404 Not Found", "I can't find Todo.".to_string())
+        let error = "Todo not found.";
+        log_error(error);
+        ("404 Not Found", error.to_string())
     }
 }
 
@@ -277,7 +308,9 @@ pub fn update_todo(
         let body = serde_json::to_string(todo).unwrap();
         ("200 OK", body)
     } else {
-        ("404 Not Found", "can't find Todo.".to_string())
+        let error = "Todo not found.";
+        log_error(error);
+        ("404 Not Found", error.to_string())
     }
 }
 
@@ -286,7 +319,9 @@ pub fn delete_todo(id: usize, db: Db) -> (&'static str, String) {
     if db.remove(&id.to_string()).is_some() {
         ("200 OK", "Todo has been deleted.".to_string())
     } else {
-        ("404 Not Found", "can't find Todo.".to_string())
+        let error = "Todo not found.";
+        log_error(error);
+        ("404 Not Found", error.to_string())
     }
 }
 
@@ -311,10 +346,13 @@ pub fn handle_connection(mut stream: TcpStream, db: Db) {
             );
 
             if let Err(e) = stream.write_all(response.as_bytes()) {
-                eprintln!("Failed to write to the stream.: {}", e);
+                eprintln!("Failed to write to stream: {}", e);
+                log_error(&format!("Stream write error: {}", e));
             }
         }
         Err(e) => {
+            let error = "Failed to read from stream.";
+            log_error(&format!("Read error details: {}", e));
             eprintln!("Failed to read from stream: {}", e);
         }
     }
