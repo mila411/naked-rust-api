@@ -65,12 +65,22 @@ impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<mpsc::Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || {
             loop {
+                // Limit the scope of mutex guard
                 let job = {
                     let receiver = receiver.lock().unwrap();
-                    receiver.recv().unwrap()
+                    receiver.recv()
                 };
-                println!("Worker {} received a job. Executing.", id);
-                job();
+
+                match job {
+                    Ok(job) => {
+                        println!("Worker {} received a job. Executing.", id);
+                        job();
+                    }
+                    Err(_) => {
+                        println!("Worker {} disconnected; shutting down.", id);
+                        break;
+                    }
+                }
             }
         });
 
